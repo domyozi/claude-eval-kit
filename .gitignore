@@ -11,3 +11,6 @@ build/
 # Local eval outputs (reports may contain user data depending on fixture)
 reports/
 out/
+
+# macOS
+.DS_Store
