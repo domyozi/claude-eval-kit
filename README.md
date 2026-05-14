@@ -216,39 +216,36 @@ pairs = await replay_and_pair(
 
 ## Architecture
 
+### Eval flow (one pair → scored)
+
+```mermaid
+flowchart LR
+  J["(user_input, ai_response) pair"] --> JS["judge: system prompt + rubric XML<br/>(anchor examples per dimension)"]
+  J --> JU["judge: user message<br/>&lt;eval_pair&gt; ... &lt;/eval_pair&gt;"]
+  JS --> A["Anthropic Claude<br/>(judge model — Haiku by default)"]
+  JU --> A
+  A -->|"&lt;observation&gt; → &lt;scores&gt; JSON"| P["parser<br/>(brace-counting + raw_decode)"]
+  P --> R["JudgeResult<br/>per-dim score + rationale + total"]
+  R --> AGG["summarize(label, model)"]
 ```
-                    ┌────────────────────┐
-                    │  fixture JSON      │
-                    │  fixed user_inputs │
-                    └─────────┬──────────┘
-                              │
-                       (replay mode)
-                              ▼
-            ┌─────────────────────────────────┐
-            │  PromptBuilder (pluggable)      │
-            │  entry → (system, user)         │
-            └─────────────────┬───────────────┘
-                              │
-                              ▼
-            ┌─────────────────────────────────┐
-            │  Anthropic SDK — fresh response │
-            └─────────────────┬───────────────┘
-                              │
-                              ▼
-            ┌─────────────────────────────────┐
-            │  LLM-as-judge                   │
-            │  rubric → 1/2/4/5 per dim       │
-            │  <observation> → <scores>       │
-            └─────────────────┬───────────────┘
-                              │
-                              ▼
-                  ┌───────────┴───────────┐
-                  ▼                       ▼
-         ┌────────────────┐    ┌────────────────────┐
-         │ markdown report│    │ baseline.json diff │
-         │ + worst N      │    │ → CI fail on drop  │
-         └────────────────┘    └────────────────────┘
+
+### Replay architecture (CI loop)
+
+```mermaid
+flowchart TD
+  F["fixture JSON<br/>fixed user_inputs"] --> PB["PromptBuilder (pluggable)<br/>entry → (system, user)"]
+  PB -->|"current prompt code"| ANT["Anthropic SDK<br/>fresh AI response"]
+  ANT --> JF["judge each pair<br/>(eval flow above, in parallel)"]
+  JF --> SUM["summary JSON<br/>+ markdown report"]
+  SUM --> BD["baseline.json diff"]
+  BL["committed baseline<br/>(captured on main)"] --> BD
+  BD -->|"any dim drops ≥ threshold"| FAIL["CI fail"]
+  BD -->|"otherwise"| PASS["CI pass + sticky PR comment"]
 ```
+
+The replay step is what makes prompt A/B testing possible: same inputs, different prompt
+versions, comparable outputs. Without it, eval would only measure the judge's stability,
+not the prompt's effect.
 
 ---
 
@@ -380,6 +377,46 @@ coach-style assistants but is a usable starting point for general-purpose evalua
   with thousands of samples.
 - **Not human-eval-calibrated.** The judge model is itself an LLM with biases. For
   high-stakes decisions, treat the score as a screening signal and add human review.
+
+---
+
+## Failure cases observed
+
+Real failures the kit (or its host application) hit during development. Each one
+shipped a fix or an explicit caveat — keeping them visible matters more than
+hiding the rough edges.
+
+- **Judge JSON parse failures (2 / 7 pairs at first)** — initial regex parser failed on
+  nested braces in `scores` JSON when the rationale field contained `{}`. Fixed by
+  switching to balanced-brace counting + `json.JSONDecoder.raw_decode` (tolerates
+  trailing content). Error rate dropped to 0 / 7 on subsequent runs.
+- **Confidence threshold drift (0.6 → 0.7)** — original `≥0.6` auto-apply threshold was
+  too aggressive in production, leading to "the AI just changed something I didn't ask
+  for" anti-pattern. Lowered to 0.7; still considered unsettled, planned to re-tune
+  with eval scores + acceptance rates.
+- **Prompt rule buried in a 700-line system prompt** — the rule "do not return long
+  replies to short user inputs" existed at line 359 but the model ignored it. The eval
+  surfaced this as a worst-example pattern, leading to a circuit-breaker rule promoted
+  to the very top of the prompt + a backend post-filter that strips actions on minimal
+  input (defense in depth).
+- **Tone regression as a side effect** — adding two "concreteness" rules to the
+  default prompt builder improved `specificity` by +1.28 and `actionability` by +1.43,
+  but `tone_fit` dropped by −0.14. The CI surfaced this trade-off explicitly rather
+  than letting it pass unnoticed. Below the fail threshold (0.3) so the PR shipped,
+  but the regression became visible material for the next iteration.
+- **Same-family judge bias** — Claude judging Claude is fast and cheap but is known
+  to be susceptible to fawning bias (rating responses higher because the writing
+  style matches the judge's expectations). Currently flagged as an open limitation;
+  cross-model ensemble (Sonnet + Haiku) and human-judge agreement studies are the
+  next steps.
+- **Small sample size variance** — 7-pair fixtures produce noisy averages (one
+  outlier shifts `avg_total` by ~0.1). The fail threshold (0.3) was chosen to be
+  forgiving at this scale; tightening will require scaling fixtures to 50–100.
+- **Replay mock context vs production reality** — the bundled replay mode uses a
+  minimal mock `CoachContext`; real prompts depend on per-user memory + habit history,
+  so replay-derived scores measure the prompt's effect at fixed context, not at full
+  production context. Real production scores (Phase A in the case study) cover the
+  full-context path. Both are useful for different questions.
 
 ---
 
