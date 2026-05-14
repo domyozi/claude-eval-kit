@@ -119,6 +119,40 @@ The two layers serve different purposes:
 I see this as the **right shape for any LLM-app feature** that has side effects.
 LLMs are probabilistic; never rely on a single layer of "the prompt will tell it not to."
 
+The reasoning here comes from B2B AI experience, not from this project alone:
+
+> "確率論的なものについては、確率の低い事象を引く可能性は絶対に起こり得る。
+> このプロジェクト以外でも、自分自身が今携わっている業務の中で何度も目にし、
+> 感じているところ。… B2B 向けの AI 実装に携わっていく中では、その影響が次の
+> 部署であったり、最終的には対外・対顧客向けにまで広がる可能性もあります。
+> そのため『LLM がルールに従う』という期待に頼るのではなく、仮にルールに従わ
+> なかった際においても問題なく業務が回る設計の重要性を学んでいます。"
+
+## Iteration: how the memory-write threshold drifted from 0.6 to 0.7
+
+Confidence-based gating sounds neat in design but the actual number is empirical.
+The implementation went through this loop:
+
+1. **0.6 threshold**: original setting for "AI is confident enough to write memory directly."
+   In production this proved too aggressive — `memory_patch` events fired on speculative
+   AI inferences, causing the "your AI just changed something you didn't ask for"
+   anti-pattern. The kind of behavior that makes users distrust an AI feature for good.
+2. **Tightened to 0.7**: half the unwanted writes disappeared. The remaining ones became
+   harder failure cases worth investigating individually.
+3. **Still not settled**: the kit deliberately doesn't claim 0.7 is "correct." The plan is
+   to keep watching eval scores **and** the accept/reject rate of suggested actions, and
+   adjust as more data accumulates.
+
+> "実際、これまではスコア 0.6 以上を確信ゲートとして一番上に設け、直接適用するように
+> していたが、それだとあまりにも強すぎたため、現在は 0.7 に抑えるといったループ的な
+> 評価と実装を繰り返し、今の形に落ち着いている。一方で、ここについてはまだ検討の
+> 余地があると考えている。"
+
+This is the kind of iteration an eval pipeline makes legible. Without one, "this threshold
+feels too aggressive" stays as a hunch in someone's head; with one, it becomes a number
+that moves on a dashboard. The dashboard is the artifact that lets the loop continue
+running even when attention is elsewhere.
+
 ## What didn't make the cut
 
 - **LangChain / LangGraph**: considered, decided against. The backend was already using

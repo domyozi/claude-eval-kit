@@ -13,6 +13,88 @@ replay mode, and GitHub Actions integration.
 
 ---
 
+## Why this matters (long form)
+
+This kit was extracted from a real production deployment. The "why" of each design choice
+matters because the kit's job is **to make probabilistic systems behave predictably enough
+to ship**. Below: the 6 questions every LLM-app team eventually faces, and what this kit
+answers.
+
+### Why evals matter
+
+When the prompt is short, eyeballing 5 responses is enough to feel a change.
+When the prompt grows to 700 lines (and a real coaching prompt will), small edits
+**improve one behavior and silently break another**. In our production case we observed
+this directly: a fix that made one response shape better made the AI return long-form
+replies to single-word user inputs like `OK!` and over-quote past memory in unrelated
+turns. The instruction "don't reply long to short inputs" **was already in the prompt** —
+buried in line 359 of dense rules. Humans miss this. Eval surfaces it.
+
+> "プロンプトの量が非常に膨大だったこともあり、例えば「OK」のような端的な回答に
+> 対しても非常に長文で返してしまったり、過去のメモリ情報を参照しすぎて返答して
+> しまったりといった事象が発生していました。… 大量のプロンプトの中にその指示が
+> 埋没していたことが原因。" — developer note
+
+### Why LLM-as-judge (not human eval)
+
+The kit does **not** claim to replace human evaluation. It claims to make human evaluation
+**rarer and more targeted**. With a stable rubric and a frozen fixture, CI can answer
+"did this PR move the average score?" without asking a human. Humans get pulled in for
+the worst examples (where the judge flags low confidence) and for periodic calibration
+between judge model and reality.
+
+### Why replay matters
+
+The naive eval pattern — "sample 10 recent `(user_input, ai_response)` pairs from prod
+and judge them" — has one problem: the AI responses came from the **old** prompt.
+A new prompt won't have produced any of them. Evaluating those pairs after a prompt
+change measures the judge's stability, not the prompt's effect.
+
+Replay mode fixes this by keeping a **fixed fixture of user inputs** and generating fresh
+AI responses with whatever prompt is on the current branch. Same inputs, two prompts → fair
+A/B comparison. This is what makes CI possible.
+
+> "ユーザー使用を待たずに prompt 改修の効果を事前検証したかった" — developer note
+
+### Why CI integration (not just CLI)
+
+A standalone CLI is sufficient for one engineer running eval manually. It is **not**
+sufficient for long-term operations. Manual eval falls off; PR comments compound.
+Building this loop into CI changes the question from "did I remember to eval?" to
+"why did this PR drop specificity by 0.5?". The PR comment is the artifact that
+keeps the loop running even when nobody is watching.
+
+> "手動 eval は回らない" — developer note
+
+### Why a 1/2/4/5 scale (with no 3)
+
+Likert-style scales suffer from **central tendency bias**: when uncertain, both humans
+and models default to the middle value. By removing 3 entirely, the judge is forced to
+commit to a leaning ("more good than bad" or vice versa), which surfaces signal in the
+noise.
+
+This is a deliberate design choice — **not** a claim that 1/2/4/5 is empirically superior
+to 1-5 in this context. The kit has not yet run a controlled experiment comparing the two.
+Future work: ablate by adding 3 back and measuring judge-human agreement on a fixed set.
+
+### Why 4 dimensions and not more
+
+The default rubric (relevance / specificity / actionability / tone_fit) targets a coaching
+domain. More dimensions would be more expensive (token cost is roughly linear in dimension
+count) and would dilute the signal — each additional dimension is judged with less
+attention by the model.
+
+**`safety` and `factuality` are intentionally out of scope** for this rubric. They are
+better handled by:
+- Backend-side guardrails (input filters, output schema validators)
+- Periodic human review of the worst examples
+- A separate eval suite designed for adversarial inputs
+
+Treating "safety" as one of four equally-weighted scores would be misleading. Defense in
+depth means owning the layer that's right for the threat.
+
+---
+
 ## In action
 
 A live demo PR ([#1](https://github.com/domyozi/claude-eval-kit/pull/1)) adds two concreteness
